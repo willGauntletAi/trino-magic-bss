@@ -404,7 +404,7 @@ export function register(app: Application): void {
         // Create table name mapping for each tag
         const tableNameByTag: { [tag: string]: string } = {};
 
-        // Simply use capitalized tag name for each tag
+        // Use tag name with first letter capitalized
         for (const tag of Object.keys(operationsByTag)) {
             const capitalizedTag = tag.charAt(0).toUpperCase() + tag.slice(1);
             console.log(`[DEBUG] Creating table name mapping for tag "${tag}" -> "${capitalizedTag}"`);
@@ -574,7 +574,20 @@ export async function ${op.operationId}(req: Request, res: Response) {
       offset
     );
     
-    return res.status(200).json(records);
+    // Transform array results into objects
+    const transformedRecords = records.map(record => {
+      if (Array.isArray(record)) {
+        // Use the actual column names from Trino
+        const columnNames = ['id', 'description', 'name', '@type'];
+        return columnNames.reduce((obj, colName, index) => {
+          obj[colName] = record[index];
+          return obj;
+        }, {} as any);
+      }
+      return record;
+    });
+    
+    return res.status(200).json(transformedRecords);
   } catch (error) {
     console.error(\`Error in ${op.operationId}:\`, error);
     return res.status(500).json({
