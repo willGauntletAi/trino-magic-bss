@@ -1,0 +1,57 @@
+/**
+ * Utility functions for API operations and response formatting
+ */
+
+/**
+ * Adds HATEOAS-style href links to resources
+ * @param resources Array of resources or single resource object
+ * @param baseUrl Base URL for the API
+ * @param resourcePath The path to the resource (e.g., '/api/users')
+ * @param idField The field name containing the resource ID (default: 'id')
+ * @returns Resources with href properties added
+ */
+export function addHrefLinks<T extends Record<string, any>>(
+  resources: T[] | T,
+  baseUrl: string,
+  resourcePath: string,
+  idField: string = 'id'
+): T[] | T {
+  // Ensure the resource path has leading slash but no trailing slash
+  const normalizedPath = resourcePath.startsWith('/') 
+    ? resourcePath 
+    : `/${resourcePath}`;
+  
+  // Handle array of resources
+  if (Array.isArray(resources)) {
+    return resources.map(resource => addHrefToResource(resource, baseUrl, normalizedPath, idField));
+  }
+  
+  // Handle single resource
+  if (resources && typeof resources === 'object') {
+    return addHrefToResource(resources, baseUrl, normalizedPath, idField);
+  }
+  
+  // Return unchanged if not an object or array
+  return resources;
+}
+
+/**
+ * Helper function to add href to a single resource
+ */
+function addHrefToResource<T extends Record<string, any>>(
+  resource: T,
+  baseUrl: string,
+  resourcePath: string,
+  idField: string
+): T {
+  // Skip if resource doesn't have the ID field
+  if (!resource || !resource[idField]) {
+    return resource;
+  }
+  
+  // Create a new object with the href property
+  return {
+    ...resource,
+    href: `${baseUrl}${resourcePath}/${resource[idField]}`
+  };
+} 

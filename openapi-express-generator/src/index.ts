@@ -121,6 +121,31 @@ class OpenAPIExpressGenerator {
 
         // Generate README
         await this.generateReadme(spec, outputDir);
+
+        // Create utilities directory and Trino utility file
+        fs.mkdirSync(path.join(outputDir, 'src', 'utils'), { recursive: true });
+
+        // Copy the utility template files
+        const trinoUtilTemplate = fs.readFileSync(
+            path.join(__dirname, 'templates', 'utils', 'trino-util.ts.template'),
+            'utf-8'
+        );
+        fs.writeFileSync(path.join(outputDir, 'src', 'utils', 'trino-util.ts'), trinoUtilTemplate);
+
+        // Copy the API utilities template
+        const apiUtilTemplate = fs.readFileSync(
+            path.join(__dirname, 'templates', 'utils', 'api-utils.ts.template'),
+            'utf-8'
+        );
+        fs.writeFileSync(path.join(outputDir, 'src', 'utils', 'api-utils.ts'), apiUtilTemplate);
+
+        // Create .env file with Trino configuration
+        const envTemplate = fs.readFileSync(
+            path.join(__dirname, 'templates', 'env.template'),
+            'utf-8'
+        );
+        fs.writeFileSync(path.join(outputDir, '.env'), envTemplate);
+        fs.writeFileSync(path.join(outputDir, '.env.example'), envTemplate);
     }
 
     private async generatePackageJson(outputDir: string): Promise<void> {
@@ -392,22 +417,6 @@ export default app;
         console.log("[DEBUG] Final table name mappings:", tableNameByTag);
         console.log("Generating server code...");
 
-        // Create utilities directory and Trino utility file
-        fs.mkdirSync(path.join(outputDir, 'src', 'utils'), { recursive: true });
-        const trinoUtilTemplate = fs.readFileSync(
-            path.join(__dirname, 'templates', 'utils', 'trino-util.ts.template'),
-            'utf-8'
-        );
-        fs.writeFileSync(path.join(outputDir, 'src', 'utils', 'trino-util.ts'), trinoUtilTemplate);
-
-        // Create .env file with Trino configuration
-        const envTemplate = fs.readFileSync(
-            path.join(__dirname, 'templates', 'env.template'),
-            'utf-8'
-        );
-        fs.writeFileSync(path.join(outputDir, '.env'), envTemplate);
-        fs.writeFileSync(path.join(outputDir, '.env.example'), envTemplate);
-
         // Load the non-GET operations template once
         const nonGetTemplateContent = fs.readFileSync(
             path.join(__dirname, 'templates', 'controller-non-get.ts.template'),
@@ -459,7 +468,8 @@ export default app;
                         operationId: op.operationId,
                         summary: op.summary || (op.path.includes(':id') ?
                             `Retrieve ${resourceName} by ID` : `List ${resourceName} objects`),
-                        isList: !op.path.includes(':id') // true for list operations, false for retrieve
+                        isList: !op.path.includes(':id'), // true for list operations, false for retrieve
+                        resourcePath: op.path.replace(/:[^/]+/g, '').replace(/\/+$/, '') // Path with param placeholders removed and trailing slashes trimmed
                     };
 
                     // Compile and process template
@@ -717,6 +727,10 @@ npm run dev
 This server implements the following API endpoints:
 
 ${this.generateEndpointDocs(spec)}
+
+### HATEOAS Support
+
+All API responses include HATEOAS-style links in the form of an \`href\` property that points to the canonical URL for accessing each resource individually. This allows for easier navigation through the API.
 
 ## Project Structure
 

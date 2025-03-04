@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { getRecords, getById, processFieldSelection } from '../utils/trino-util';
+import { addHrefLinks } from '../utils/api-utils';
 
 {{#if isList}}
 /**
@@ -37,8 +38,13 @@ export async function {{operationId}}(req: Request, res: Response) {
       columns    // Pass the columns to select
     );
     
-    // Return just the array of objects without any extra metadata
-    return res.status(200).json(records);
+    // Add href links to the resources
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const resourcePath = '{{resourcePath}}'; // Use the provided resource path
+    const resourcesWithHrefs = addHrefLinks(records, baseUrl, resourcePath);
+    
+    // Return the resources with href links
+    return res.status(200).json(resourcesWithHrefs);
   } catch (error) {
     console.error(`Error in {{operationId}}:`, error);
     return res.status(500).json({
@@ -86,8 +92,13 @@ export async function {{operationId}}(req: Request, res: Response) {
       });
     }
     
-    // Return just the object without any extra metadata
-    return res.status(200).json(record);
+    // Add href link to the resource
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const resourcePath = '{{resourcePath}}'; // Use the provided resource path
+    const resourceWithHref = addHrefLinks(record, baseUrl, resourcePath);
+    
+    // Return the resource with href link
+    return res.status(200).json(resourceWithHref);
   } catch (error) {
     console.error(`Error in {{operationId}}:`, error);
     return res.status(500).json({
