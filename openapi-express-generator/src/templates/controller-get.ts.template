@@ -1,52 +1,83 @@
 import { Request, Response } from 'express';
-import { getRecords, getById } from '../utils/trino-util';
+import { getRecords, getById, processFieldSelection } from '../utils/trino-util';
 
+{{#if isList}}
 /**
- * List or find {{resourceName}} objects
+ * {{summary}}
  */
-export async function list{{resourceName}}(req: Request, res: Response) {
+export async function {{operationId}}(req: Request, res: Response) {
+  // Log the complete request URL - using direct string to ensure it appears
+  const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+  console.log('========================');
+  console.log(`REQUEST URL: ${fullUrl}`);
+  console.log('========================');
+  
   try {
     // Get query parameters
     const fields = req.query.fields as string | undefined;
     const offset = parseInt(req.query.offset as string || '0', 10);
     const limit = parseInt(req.query.limit as string || '100', 10);
     
-    // Define columns to select based on fields parameter
-    const columns = fields ? fields.split(',') : ['*'];
-
+    // Explicitly handle fields=none case
+    let columns: string[];
+    if (fields === 'none') {
+      console.log('[Controller] Fields parameter is "none", will only return id column');
+      columns = ['id'];
+    } else {
+      console.log(`[Controller] Processing fields parameter: ${fields}`);
+      columns = fields ? fields.split(',') : ['*'];
+    }
+    
     // Get records from Trino
     const records = await getRecords<any>(
       '{{tableName}}',
       limit,
-      offset
+      offset,
+      undefined, // No where clause
+      columns    // Pass the columns to select
     );
     
+    // Return just the array of objects without any extra metadata
     return res.status(200).json(records);
   } catch (error) {
-    console.error(`Error in list{{resourceName}}:`, error);
+    console.error(`Error in {{operationId}}:`, error);
     return res.status(500).json({
       message: 'Internal Server Error',
       details: process.env.NODE_ENV === 'production' ? undefined : (error as Error).message
     });
   }
 }
-
+{{else}}
 /**
- * Retrieves a {{resourceName}} by ID
+ * {{summary}}
  */
-export async function retrieve{{resourceName}}(req: Request, res: Response) {
+export async function {{operationId}}(req: Request, res: Response) {
+  // Log the complete request URL - using direct string to ensure it appears
+  const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+  console.log('========================');
+  console.log(`REQUEST URL: ${fullUrl}`);
+  console.log('========================');
+  
   try {
     const id = req.params.id;
     const fields = req.query.fields as string | undefined;
     
-    // Define columns to select based on fields parameter
-    const columns = fields ? fields.split(',') : ['*'];
+    // Explicitly handle fields=none case
+    let columns: string[];
+    if (fields === 'none') {
+      console.log('[Controller] Fields parameter is "none", will only return id column');
+      columns = ['id'];
+    } else {
+      console.log(`[Controller] Processing fields parameter: ${fields}`);
+      columns = fields ? fields.split(',') : ['*'];
+    }
 
     // Get record by ID from Trino
     const record = await getById<any>(
       '{{tableName}}',
       id,
-      'id' // Assuming 'id' is the ID column name
+      'id', // Assuming 'id' is the ID column name
+      columns // Pass the columns to select
     );
     
     if (!record) {
@@ -55,12 +86,14 @@ export async function retrieve{{resourceName}}(req: Request, res: Response) {
       });
     }
     
+    // Return just the object without any extra metadata
     return res.status(200).json(record);
   } catch (error) {
-    console.error(`Error in retrieve{{resourceName}}:`, error);
+    console.error(`Error in {{operationId}}:`, error);
     return res.status(500).json({
       message: 'Internal Server Error',
       details: process.env.NODE_ENV === 'production' ? undefined : (error as Error).message
     });
   }
-} 
+}
+{{/if}} 

@@ -135,6 +135,7 @@ class OpenAPIExpressGenerator {
                 build: 'tsc',
                 test: 'jest'
             },
+            type: 'commonjs',
             dependencies: {
                 express: '^4.18.2',
                 'cors': '^2.8.5',
@@ -237,129 +238,106 @@ export default app;
     }
 
     private async generateRoutes(spec: OpenAPIDocument, outputDir: string): Promise<void> {
-        const routeIndexTemplate = `
-import { Application } from 'express';
-{{#each paths}}
-import { register as register{{pathToFunctionName path}} } from './{{pathToFileName path}}';
-{{/each}}
+        console.log("Generating routes...");
+        const indexContent: string[] = [];
 
-export function registerRoutes(app: Application): void {
-  {{#each paths}}
-  register{{pathToFunctionName path}}(app);
-  {{/each}}
-}
-`.trim();
+        // Create routes directory
+        fs.mkdirSync(path.join(outputDir, 'src', 'routes'), { recursive: true });
 
-        const routeFileTemplate = `
-import { Application, Request, Response, NextFunction } from 'express';
-import * as controllers from '../controllers/{{controllerNameLowerCase}}';
+        // Group paths by tag
+        const pathsByTag: { [tag: string]: { path: string; method: string; operationId: string }[] } = {};
 
-export function register(app: Application): void {
-  {{#each operations}}
-  app.{{method}}('{{path}}', async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const result = await controllers.{{operationId}}(req, res);
-      return result;
-    } catch (error) {
-      next(error);
-    }
-  });
-  {{/each}}
-}
-`.trim();
-
-        // Group paths by tag to create controller files
-        const paths: { [path: string]: { path: string; operations: any[] } } = {};
-
-        if (spec.paths) {
-            for (const [pathName, pathItem] of Object.entries(spec.paths || {})) {
-                const operations: any[] = [];
-
-                // Process each HTTP method for this path
-                for (const [method, operation] of Object.entries(pathItem || {})) {
-                    if (['get', 'post', 'put', 'delete', 'patch'].includes(method) && operation) {
-                        const op = operation as OpenAPIV3.OperationObject;
-
-                        // Skip operations without operationId
-                        if (!op.operationId) {
-                            console.warn(`Warning: Operation without operationId at ${method.toUpperCase()} ${pathName}`);
-                            continue;
-                        }
-
-                        const tag = op.tags?.[0] || 'default';
-
-                        // Determine if this is a retrieve operation (GET with ID path parameter)
-                        const isRetrieveOperation = method === 'get' && pathName.includes('{id}');
-
-                        operations.push({
-                            method,
-                            path: pathName.replace(/{(\w+)}/g, ':$1'), // Convert {param} to :param
-                            operationId: op.operationId,
-                            tag: tag,
-                            summary: op.summary || `${method.toUpperCase()} ${pathName}`,
-                            description: op.description,
-                            isRetrieveOperation
-                        });
-                    }
+        // Iterate over all paths in the OpenAPI spec
+        for (const [path, pathObj] of Object.entries(spec.paths || {})) {
+            for (const [method, methodObj] of Object.entries(pathObj || {})) {
+                if (!['get', 'post', 'put', 'delete', 'patch'].includes(method)) {
+                    continue; // Skip non-standard methods
                 }
 
-                if (operations.length > 0) {
-                    paths[pathName] = {
-                        path: pathName,
-                        operations
-                    };
+                // Cast to OperationObject to access properties
+                const operation = methodObj as OpenAPIV3.OperationObject;
+
+                // Skip if there's no operationId
+                if (!operation.operationId) {
+                    console.warn(`Skipping ${method.toUpperCase()} ${path} - no operationId`);
+                    continue;
                 }
+
+                // Get the first tag, if available
+                const tag = operation.tags && operation.tags.length > 0 ? operation.tags[0] : 'default';
+
+                // Initialize the tag's array if it doesn't exist
+                if (!pathsByTag[tag]) {
+                    pathsByTag[tag] = [];
+                }
+
+                // Express path params use :paramName instead of {paramName}
+                const expressPath = path.replace(/{([^}]+)}/g, ':$1');
+
+                // Add the path to the tag's array
+                pathsByTag[tag].push({
+                    path: expressPath,
+                    method,
+                    operationId: operation.operationId
+                });
             }
         }
 
-        // Register Handlebars helpers
-        Handlebars.registerHelper('pathToFunctionName', (path: string) => {
-            return path
-                .replace(/^\//, '')
-                .replace(/\//g, '_')
-                .replace(/[{}]/g, '')
-                .replace(/-/g, '_')
-                .replace(/\./g, '_')
-                .replace(/:/g, '');
-        });
+        // Create a route file for each tag
+        for (const [tag, paths] of Object.entries(pathsByTag)) {
+            // Normalize the tag name for file names - convert to lowercase
+            const tagFileName = tag.toLowerCase();
 
-        Handlebars.registerHelper('pathToFileName', (path: string) => {
-            return path
-                .replace(/^\//, '')
-                .replace(/\//g, '-')
-                .replace(/[{}]/g, '')
-                .replace(/-/g, '-')
-                .replace(/\./g, '-')
-                .replace(/:/g, '')
-                .toLowerCase();
-        });
+            // Normalize the tag name for variable names - convert spaces to underscores
+            const normalizedTagName = tag.replace(/\s+/g, '_');
 
-        // Add helper for controller name in lowercase to avoid case sensitivity issues
-        Handlebars.registerHelper('controllerNameLowerCase', function (this: any) {
-            // Get the controller name from the current context and convert to lowercase
-            const controllerName = this.operations[0]?.tag || 'default';
-            return controllerName.toLowerCase();
-        });
+            let routeFileContent = `import { Application, Request, Response, NextFunction } from 'express';\n`;
+            routeFileContent += `import * as controllers from '../controllers/${tagFileName}';\n\n`;
 
-        // Generate route index file
-        const routeIndexContent = Handlebars.compile(routeIndexTemplate)({
-            paths: Object.values(paths)
-        });
+            routeFileContent += `export function register(app: Application): void {\n`;
 
-        fs.writeFileSync(path.join(outputDir, 'src', 'routes', 'index.ts'), routeIndexContent);
+            for (const { path, method, operationId } of paths) {
+                // Convert path to lowercase for Express routes except for path parameters
+                const expressPath = path
+                    .split('/')
+                    .map(segment => segment.startsWith(':') ? segment : segment.toLowerCase())
+                    .join('/');
 
-        // Generate individual route files
-        for (const [pathKey, pathObj] of Object.entries(paths)) {
-            const routeFileContent = Handlebars.compile(routeFileTemplate)({
-                controllerName: pathObj.operations[0]?.tag || 'default',
-                operations: pathObj.operations
-            });
+                routeFileContent += `  app.${method}('${expressPath}', async (req: Request, res: Response, next: NextFunction) => {\n`;
+                routeFileContent += `    try {\n`;
+                // Updated to use the full operationId from the spec
+                routeFileContent += `      const result = await controllers.${operationId}(req, res);\n`;
+                routeFileContent += `      return result;\n`;
+                routeFileContent += `    } catch (error) {\n`;
+                routeFileContent += `      next(error);\n`;
+                routeFileContent += `    }\n`;
+                routeFileContent += `  });\n`;
+            }
 
-            fs.writeFileSync(
-                path.join(outputDir, 'src', 'routes', `${Handlebars.helpers.pathToFileName(pathObj.path)}.ts`),
-                routeFileContent
-            );
+            routeFileContent += `}\n`;
+
+            // Write the route file
+            fs.writeFileSync(path.join(outputDir, 'src', 'routes', `${tagFileName.replace(/\s+/g, '')}.ts`), routeFileContent);
+
+            // Add the route import to the index using the normalized tag name in the import statement
+            indexContent.push(`import { register as register${this.capitalizeFirstLetter(normalizedTagName)} } from './${tagFileName.replace(/\s+/g, '')}';`);
         }
+
+        // Create index file that registers all routes
+        let routeIndexTemplate = `import { Application } from 'express';\n`;
+        for (const importLine of indexContent) {
+            routeIndexTemplate += importLine + '\n';
+        }
+
+        routeIndexTemplate += `\nexport function registerRoutes(app: Application): void {\n`;
+        for (const [tag, _] of Object.entries(pathsByTag)) {
+            // Use the normalized tag name in the function call
+            const normalizedTagName = tag.replace(/\s+/g, '_');
+            routeIndexTemplate += `  register${this.capitalizeFirstLetter(normalizedTagName)}(app);\n`;
+        }
+        routeIndexTemplate += `}\n`;
+
+        fs.writeFileSync(path.join(outputDir, 'src', 'routes', 'index.ts'), routeIndexTemplate);
     }
 
     private async generateControllers(spec: OpenAPIDocument, outputDir: string): Promise<void> {
@@ -430,44 +408,11 @@ export function register(app: Application): void {
         fs.writeFileSync(path.join(outputDir, '.env'), envTemplate);
         fs.writeFileSync(path.join(outputDir, '.env.example'), envTemplate);
 
-        // Modified template for non-GET methods that doesn't include import statements
-        const nonGetControllerTemplate = `
-{{#each operations}}
-/**
- * {{summary}}
- */
-export async function {{operationId}}(req: Request, res: Response) {
-  try {
-    // TODO: Implement {{operationId}} logic
-    {{#if requestBody}}
-    const requestData = req.body;
-    {{/if}}
-    {{#if parameters}}
-    {{#each parameters}}
-    {{#if this.in}}
-    {{#if (eq this.in 'path')}}
-    const {{this.name}} = req.params.{{this.name}};
-    {{/if}}
-    {{#if (eq this.in 'query')}}
-    const {{this.name}} = req.query.{{this.name}};
-    {{/if}}
-    {{/if}}
-    {{/each}}
-    {{/if}}
-    
-    return res.status(200).json({
-      message: 'Operation {{operationId}} not yet implemented'
-    });
-  } catch (error) {
-    console.error(\`Error in {{operationId}}:\`, error);
-    return res.status(500).json({
-      message: 'Internal Server Error'
-    });
-  }
-}
-
-{{/each}}
-`.trim();
+        // Load the non-GET operations template once
+        const nonGetTemplateContent = fs.readFileSync(
+            path.join(__dirname, 'templates', 'controller-non-get.ts.template'),
+            'utf-8'
+        );
 
         // Register Handlebars helpers
         Handlebars.registerHelper('eq', function (arg1: any, arg2: any) {
@@ -490,16 +435,7 @@ export async function {{operationId}}(req: Request, res: Response) {
 
             let controllerContent = '';
 
-            // Include imports just once at the top
-            controllerContent += `import { Request, Response } from 'express';\n`;
-
-            if (getOperations.length > 0) {
-                controllerContent += `import { getRecords, getById } from '../utils/trino-util';\n\n`;
-            } else {
-                controllerContent += '\n';
-            }
-
-            // Process GET operations with Trino implementation
+            // Read in GET operations from templates with Trino implementation 
             for (const op of getOperations) {
                 const resourceName = this.capitalizeFirstLetter(tag);
                 // Use the table name from our mapping
@@ -510,107 +446,63 @@ export async function {{operationId}}(req: Request, res: Response) {
                   - Resource name: "${resourceName}"
                   - Operation path: "${op.path}"`);
 
-                const apiPath = resourceName.charAt(0).toLowerCase() + resourceName.slice(1); // camelCase for API paths
+                try {
+                    const templateContent = fs.readFileSync(
+                        path.join(__dirname, 'templates', 'controller-get.ts.template'),
+                        'utf-8'
+                    );
 
-                if (op.path.includes(':id')) {
-                    // This is a get-by-id operation
-                    const functionTemplate = `
-/**
- * ${op.summary}
- */
-export async function ${op.operationId}(req: Request, res: Response) {
-  try {
-    const id = req.params.id;
-    const fields = req.query.fields as string | undefined;
-    
-    // Define columns to select based on fields parameter
-    const columns = fields ? fields.split(',') : ['*'];
+                    // Create template data
+                    const templateData = {
+                        resourceName,
+                        tableName,
+                        operationId: op.operationId,
+                        summary: op.summary || (op.path.includes(':id') ?
+                            `Retrieve ${resourceName} by ID` : `List ${resourceName} objects`),
+                        isList: !op.path.includes(':id') // true for list operations, false for retrieve
+                    };
 
-    // Get record by ID from Trino
-    const record = await getById<any>(
-      '${tableName}', // This is already capitalized from tableNameByTag
-      id,
-      'id' // Assuming 'id' is the ID column name
-    );
-    
-    if (!record) {
-      return res.status(404).json({
-        message: \`${resourceName} with ID \${id} not found\`
-      });
-    }
-    
-    return res.status(200).json(record);
-  } catch (error) {
-    console.error(\`Error in ${op.operationId}:\`, error);
-    return res.status(500).json({
-      message: 'Internal Server Error',
-      details: process.env.NODE_ENV === 'production' ? undefined : (error as Error).message
-    });
-  }
-}
+                    // Compile and process template
+                    const template = Handlebars.compile(templateContent);
+                    const processedTemplate = template(templateData);
 
-`;
-                    controllerContent += functionTemplate;
-                } else {
-                    // This is a list operation
-                    const functionTemplate = `
-/**
- * ${op.summary}
- */
-export async function ${op.operationId}(req: Request, res: Response) {
-  try {
-    // Get query parameters
-    const fields = req.query.fields as string | undefined;
-    const offset = parseInt(req.query.offset as string || '0', 10);
-    const limit = parseInt(req.query.limit as string || '100', 10);
-    
-    // Define columns to select based on fields parameter
-    const columns = fields ? fields.split(',') : ['*'];
-
-    // Get records from Trino
-    const records = await getRecords<any>(
-      '${tableName}', // This is already capitalized from tableNameByTag
-      limit,
-      offset
-    );
-    
-    // Transform array results into objects
-    const transformedRecords = records.map(record => {
-      if (Array.isArray(record)) {
-        // Use the actual column names from Trino
-        const columnNames = ['id', 'description', 'name', '@type'];
-        return columnNames.reduce((obj, colName, index) => {
-          obj[colName] = record[index];
-          return obj;
-        }, {} as any);
-      }
-      return record;
-    });
-    
-    return res.status(200).json(transformedRecords);
-  } catch (error) {
-    console.error(\`Error in ${op.operationId}:\`, error);
-    return res.status(500).json({
-      message: 'Internal Server Error',
-      details: process.env.NODE_ENV === 'production' ? undefined : (error as Error).message
-    });
-  }
-}
-
-`;
-                    controllerContent += functionTemplate;
+                    // For the first GET operation, keep the imports; for others, strip them
+                    if (controllerContent === '') {
+                        controllerContent += processedTemplate;
+                    } else {
+                        // Strip imports from the beginning of the template for subsequent operations
+                        const functionsStartIndex = processedTemplate.indexOf('export async function');
+                        if (functionsStartIndex > 0) {
+                            controllerContent += processedTemplate.substring(functionsStartIndex);
+                        } else {
+                            controllerContent += processedTemplate;
+                        }
+                    }
+                } catch (error: any) {
+                    console.error(`Error processing template for ${op.operationId}:`, error);
+                    throw new Error(`Failed to generate controller function for ${op.operationId}: ${error.message}`);
                 }
             }
 
             // Process non-GET operations
             if (nonGetOperations.length > 0) {
-                const template = Handlebars.compile(nonGetControllerTemplate);
-                controllerContent += template({ operations: nonGetOperations });
+                try {
+                    const template = Handlebars.compile(nonGetTemplateContent);
+                    controllerContent += template({ operations: nonGetOperations });
+                } catch (error: any) {
+                    console.error(`Error processing non-GET operations template for tag ${tag}:`, error);
+                    throw new Error(`Failed to generate non-GET controller functions for tag ${tag}: ${error.message}`);
+                }
             }
 
-            // Write controller file
-            const fileName = tag.toLowerCase() + '.ts';
-            fs.writeFileSync(path.join(outputDir, 'src', 'controllers', fileName), controllerContent);
+            // Create the controller file
+            const tagFileName = tag.toLowerCase().replace(/\s+/g, '');
+
+            // Write controller file with all the generated functions
+            fs.writeFileSync(
+                path.join(outputDir, 'src', 'controllers', `${tagFileName}.ts`),
+                controllerContent
+            );
         }
     }
 

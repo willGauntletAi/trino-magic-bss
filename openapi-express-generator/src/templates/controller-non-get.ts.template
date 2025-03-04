@@ -1,0 +1,34 @@
+{{#each operations}}
+/**
+ * {{summary}}
+ */
+export async function {{operationId}}(req: Request, res: Response) {
+  try {
+    // TODO: Implement {{operationId}} logic
+    {{#if requestBody}}
+    const requestData = req.body;
+    {{/if}}
+    {{#if parameters}}
+    {{#each parameters}}
+    {{#if this.in}}
+    {{#if (eq this.in 'path')}}
+    const {{this.name}} = req.params.{{this.name}};
+    {{/if}}
+    {{#if (eq this.in 'query')}}
+    const {{this.name}} = req.query.{{this.name}};
+    {{/if}}
+    {{/if}}
+    {{/each}}
+    {{/if}}
+    
+    return res.status(200).json({
+      message: 'Operation {{operationId}} not yet implemented'
+    });
+  } catch (error) {
+    console.error(`Error in {{operationId}}:`, error);
+    return res.status(500).json({
+      message: 'Internal Server Error'
+    });
+  }
+}
+{{/each}} 

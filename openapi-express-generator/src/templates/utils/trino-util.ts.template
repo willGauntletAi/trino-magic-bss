@@ -1,59 +1,126 @@
 import { Trino, BasicAuth } from 'trino-client';
 
-// Configuration for Trino connection
-const trinoConfig = {
-  server: `http://${process.env.TRINO_HOST || 'localhost'}:${process.env.TRINO_PORT || '8080'}`,
-  catalog: process.env.TRINO_CATALOG || 'sheets', // Default to sheets catalog
-  schema: process.env.TRINO_SCHEMA || 'default',
-  // Basic auth if user is provided
-  auth: process.env.TRINO_USER ? new BasicAuth(process.env.TRINO_USER) : undefined,
-  // Additional headers according to the Trino protocol documentation
-  headers: {
-    'X-Trino-Source': 'trino-express-api',
-    'X-Trino-Client-Info': 'Generated Express API'
+/**
+ * Process field selection to ensure id is always included
+ * @param fields Array of fields to select or special value 'none'
+ * @returns Array of fields to select
+ */
+export function processFieldSelection(fields: string[] = ['*']): string[] {
+  console.log(`[Field Selection] Processing fields: ${fields.join(', ')}`);
+  
+  // If 'none' is provided, only return 'id'
+  if (fields.length === 1 && fields[0].toLowerCase() === 'none') {
+    console.log('[Field Selection] Only returning id column');
+    return ['id'];
   }
+  
+  // If '*' is in the array, return all fields
+  if (fields.includes('*')) {
+    console.log('[Field Selection] Returning all columns');
+    return ['*'];
+  }
+  
+  // If specific fields are provided, ensure 'id' is included
+  if (!fields.includes('id')) {
+    fields.push('id');
+    console.log(`[Field Selection] Added id column, returning: ${fields.join(', ')}`);
+  } else {
+    console.log(`[Field Selection] Returning columns: ${fields.join(', ')}`);
+  }
+  
+  return fields;
+}
+
+// Configuration for Trino connection
+const serverUrl = `http://${process.env.TRINO_HOST || 'localhost'}:${process.env.TRINO_PORT || '8080'}`;
+const trinoConfig = {
+  server: serverUrl,
+  catalog: process.env.TRINO_CATALOG || 'sheets',
+  schema: process.env.TRINO_SCHEMA || 'default',
+  auth: new BasicAuth(process.env.TRINO_USER || 'trino')
 };
 
-// Create a Trino client instance
-const trino = Trino.create(trinoConfig);
+// Create a Trino client instance using the correct pattern
+const client = Trino.create(trinoConfig);
+
+/**
+ * Helper function to format row data using column information
+ */
+function formatRowWithColumns(row: any, columns: any[]): any {
+  const result: any = {};
+  // Handle numeric indexed objects (array-like)
+  if (typeof row === 'object' && !Array.isArray(row) && Object.keys(row).every(key => !isNaN(Number(key)))) {
+    columns.forEach((col, index) => {
+      result[col.name] = row[index.toString()];
+    });
+  } 
+  // Handle arrays
+  else if (Array.isArray(row)) {
+    columns.forEach((col, index) => {
+      result[col.name] = row[index];
+    });
+  } 
+  // Already an object with named keys
+  else {
+    return row;
+  }
+  return result;
+}
 
 /**
  * Execute a query against Trino
  * @param query SQL query to execute
- * @returns Promise that resolves to the query results and column metadata
+ * @returns Promise that resolves to the query results and column information
  */
-export async function executeQuery<T = any>(query: string): Promise<{ data: T[]; columns: { name: string; type: string }[] }> {
+export async function executeQuery<T = any>(query: string): Promise<{ data: T[], columns: any[] }> {
   try {
-    // Only log the actual SQL query
     console.log(`Executing Trino query: ${query}`);
-    const iterator = await trino.query(query);
     
-    let columns: { name: string; type: string }[] = [];
-    const results: T[] = [];
-
-    for await (const result of iterator) {
-      console.log('[DEBUG] Trino result chunk:', JSON.stringify(result, null, 2));
+    // Get the iterator for query results
+    const resultIterator = await client.query<T>(query);
+    
+    // Collect all results
+    const allResults: any[] = [];
+    let columns: any[] = [];
+    
+    for await (const queryResult of resultIterator) {
+      console.log('Raw Trino response structure:');
+      console.log(JSON.stringify(queryResult, null, 2).slice(0, 500) + '...');
       
-      // Get column metadata from the first result
-      if (!columns.length && result.columns) {
-        columns = result.columns.map(col => ({
-          name: col.name,
-          type: col.type
-        }));
-        console.log('[DEBUG] Column metadata:', JSON.stringify(columns, null, 2));
+      // Extract column information if available
+      if (queryResult && queryResult.columns) {
+        columns = queryResult.columns;
       }
       
-      if (result.data) {
-        console.log('[DEBUG] Data in this chunk:', JSON.stringify(result.data, null, 2));
-        results.push(...(result.data as T[]));
+      // Extract data based on the structure
+      if (Array.isArray(queryResult)) {
+        // If the result is directly an array
+        allResults.push(...queryResult);
+      } else if (queryResult && queryResult.data) {
+        // If the result has a data property
+        allResults.push(...queryResult.data);
+      } else if (queryResult && typeof queryResult === 'object' && !queryResult.columns && !queryResult.stats) {
+        // If it's a data object (not metadata)
+        allResults.push(queryResult);
       }
     }
     
-    console.log('[DEBUG] Final transformed results:', JSON.stringify(results, null, 2));
-    return { data: results, columns };
+    // Clean up the results
+    const cleanResults = allResults.filter(item => {
+      // Filter out metadata objects (those with columns or stats properties)
+      return !(item && typeof item === 'object' && (item.columns || item.stats));
+    });
+    
+    // Format results with column names if available
+    let formattedResults = cleanResults;
+    if (columns.length > 0) {
+      formattedResults = cleanResults.map(row => formatRowWithColumns(row, columns));
+    }
+    
+    console.log(`[Query Result] Returned ${formattedResults.length} records`);
+    return { data: formattedResults, columns };
   } catch (error) {
-    // Keep error logging for debugging purposes
-    console.error('Error executing Trino query:', error);
+    console.error('Error executing query:', error);
     throw error;
   }
 }
@@ -72,12 +139,6 @@ export function buildSelectQuery(
   whereClause?: string, 
   limit?: number
 ): string {
-  console.log(`[DEBUG] Building SELECT query:
-    - Input table name: "${table}"
-    - Columns: ${columns.join(', ')}
-    - Where clause: ${whereClause || 'none'}
-    - Limit: ${limit || 'none'}`);
-
   // Preserve case sensitivity in table names
   const quotedTable = table;  // The table name is already properly cased from the controller
   let query = `SELECT ${columns.join(', ')} FROM "${trinoConfig.catalog}"."${trinoConfig.schema}"."${quotedTable}"`;
@@ -90,7 +151,7 @@ export function buildSelectQuery(
     query += ` LIMIT ${limit}`;
   }
 
-  console.log(`[DEBUG] Generated SQL query: ${query}`);
+  console.log(`[SQL Query] ${query}`);
   
   return query;
 }
@@ -100,23 +161,35 @@ export function buildSelectQuery(
  * @param table The table name
  * @param id The ID value
  * @param idColumn The column name for the ID
+ * @param columns Columns to select (defaults to all columns)
  * @returns Promise resolving to the record
  */
 export async function getById<T = any>(
   table: string, 
   id: string | number, 
-  idColumn: string = 'id'
+  idColumn: string = 'id',
+  columns: string[] = ['*']
 ): Promise<T | null> {
+  // Process field selection to ensure id is included
+  const processedColumns = processFieldSelection(columns);
+  
+  console.log(`[Query Params] getById: table: ${table}, id: ${id}, idColumn: ${idColumn}, columns: ${processedColumns.join(', ')}`);
+  
   const idValue = typeof id === 'string' ? `'${id}'` : id;
-  const query = buildSelectQuery(table, ['*'], `${idColumn} = ${idValue}`);
+  const query = buildSelectQuery(table, processedColumns, `${idColumn} = ${idValue}`);
   
-  const { data, columns } = await executeQuery<T>(query);
+  const { data, columns: resultColumns } = await executeQuery<T>(query);
   
-  if (data.length === 0) return null;
+  if (data.length === 0) {
+    console.log(`[Query Result] No record found with ${idColumn} = ${idValue}`);
+    return null;
+  }
+  
+  console.log(`[Query Result] Record found with ${idColumn} = ${idValue}`);
   
   const record = data[0];
   if (Array.isArray(record)) {
-    return columns.reduce((obj, col, index) => {
+    return resultColumns.reduce((obj, col, index) => {
       obj[col.name] = record[index];
       return obj;
     }, {} as any);
@@ -130,24 +203,28 @@ export async function getById<T = any>(
  * @param limit Maximum number of records to return
  * @param offset Number of records to skip
  * @param whereClause Optional WHERE clause
+ * @param columns Columns to select (defaults to all columns)
  * @returns Promise resolving to records array
  */
 export async function getRecords<T = any>(
   table: string,
   limit: number = 100,
   offset: number = 0,
-  whereClause?: string
+  whereClause?: string,
+  columns: string[] = ['*']
 ): Promise<T[]> {
-  console.log(`[DEBUG] getRecords called with:
-    - Table name: "${table}"
-    - Limit: ${limit}
-    - Offset: ${offset}
-    - Where clause: ${whereClause || 'none'}`);
+  // Process field selection to ensure id is included
+  const processedColumns = processFieldSelection(columns);
+  
+  console.log(`[Query Params] table: ${table}, limit: ${limit}, offset: ${offset}, columns: ${processedColumns.join(', ')}`);
+  if (whereClause) {
+    console.log(`[Query Params] whereClause: ${whereClause}`);
+  }
 
   const limitClause = limit > 0 ? limit : 100;
   
-  // Build the query with proper ORDER BY, OFFSET, LIMIT sequence
-  let query = `SELECT * FROM "${trinoConfig.catalog}"."${trinoConfig.schema}"."${table}"`;
+  // Build the query with proper columns, ORDER BY, OFFSET, LIMIT sequence
+  let query = `SELECT ${processedColumns.join(', ')} FROM "${trinoConfig.catalog}"."${trinoConfig.schema}"."${table}"`;
   if (whereClause) {
     query += ` WHERE ${whereClause}`;
   }
@@ -157,27 +234,21 @@ export async function getRecords<T = any>(
   if (limitClause) {
     query += ` LIMIT ${limitClause}`;
   }
-
-  console.log('[DEBUG] Executing query:', query);
   
-  const { data, columns } = await executeQuery<T>(query);
-  console.log('[DEBUG] Raw data from Trino:', JSON.stringify(data, null, 2));
-  console.log('[DEBUG] Columns from Trino:', JSON.stringify(columns, null, 2));
+  const { data, columns: resultColumns } = await executeQuery<T>(query);
   
   // Transform array results into objects using column metadata
   const transformedResults = data.map(record => {
     if (Array.isArray(record)) {
-      const transformed = columns.reduce((obj, col, index) => {
+      return resultColumns.reduce((obj, col, index) => {
         obj[col.name] = record[index];
         return obj;
       }, {} as any);
-      console.log('[DEBUG] Transformed record:', JSON.stringify(transformed, null, 2));
-      return transformed;
     }
     return record;
   });
   
-  console.log('[DEBUG] Final transformed results:', JSON.stringify(transformedResults, null, 2));
+  console.log(`[Query Result] Returned ${transformedResults.length} records`);
   return transformedResults;
 }
 
@@ -194,25 +265,59 @@ export async function executeSql<T = any>(
   schema?: string
 ): Promise<T[]> {
   try {
-    // Create a custom client with the specified catalog/schema if provided
+    // Create custom config using the same structure as trinoConfig
     const customConfig = { ...trinoConfig };
     if (catalog) customConfig.catalog = catalog;
     if (schema) customConfig.schema = schema;
     
-    const customClient = Trino.create(customConfig);
-    const iterator = await customClient.query(sql);
+    console.log(`[Direct SQL] Executing in catalog: ${customConfig.catalog}, schema: ${customConfig.schema}`);
+    console.log(`[SQL Query] ${sql}`);
     
-    // Fetch all results
-    const results: T[] = [];
-    for await (const result of iterator) {
-      if (result.data) {
-        results.push(...(result.data as T[]));
+    // Create a new Trino client instance with the custom config
+    const customClient = Trino.create(customConfig);
+    
+    // Get the iterator for query results
+    const resultIterator = await customClient.query<T>(sql);
+    
+    // Collect all results
+    const allResults: any[] = [];
+    let columns: any[] = [];
+    
+    for await (const queryResult of resultIterator) {
+      // Extract column information if available
+      if (queryResult && queryResult.columns) {
+        columns = queryResult.columns;
+      }
+      
+      // Extract data based on the structure
+      if (Array.isArray(queryResult)) {
+        // If the result is directly an array
+        allResults.push(...queryResult);
+      } else if (queryResult && queryResult.data) {
+        // If the result has a data property
+        allResults.push(...queryResult.data);
+      } else if (queryResult && typeof queryResult === 'object' && !queryResult.columns && !queryResult.stats) {
+        // If it's a data object (not metadata)
+        allResults.push(queryResult);
       }
     }
     
-    return results;
+    // Clean up the results
+    const cleanResults = allResults.filter(item => {
+      // Filter out metadata objects (those with columns or stats properties)
+      return !(item && typeof item === 'object' && (item.columns || item.stats));
+    });
+    
+    // Format results with column names if available
+    let formattedResults = cleanResults;
+    if (columns.length > 0) {
+      formattedResults = cleanResults.map(row => formatRowWithColumns(row, columns));
+    }
+    
+    console.log(`[Query Result] Direct SQL query returned ${formattedResults.length} results`);
+    return formattedResults;
   } catch (error) {
-    console.error(`Error executing SQL query "${sql}":`, error);
+    console.error('Error executing SQL query:', error);
     throw error;
   }
 } 
