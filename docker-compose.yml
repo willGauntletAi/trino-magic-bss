@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  trino:
+    image: trinodb/trino:422
+    container_name: trino
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./etc:/etc/trino
+      - ./credentials:/credentials
+    environment:
+      - NODE_ID=trino-coordinator
+      - SHEETS_METADATA_ID=1eXhYmSob8rSFWDtG7F_j6pzxNws22Err9LCoHLWsXAw#metadata
+      # Service account path is configured in sheets.properties
+    networks:
+      - trino-network
+
+networks:
+  trino-network:
+    driver: bridge 

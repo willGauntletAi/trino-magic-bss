@@ -1,0 +1,101 @@
+import { Client } from 'trino-client';
+
+// Configuration for Trino connection
+const trinoConfig = {
+  host: process.env.TRINO_HOST || 'localhost',
+  port: parseInt(process.env.TRINO_PORT || '8080', 10),
+  user: process.env.TRINO_USER || 'trino',
+  catalog: process.env.TRINO_CATALOG || 'sheets', // Default to sheets catalog
+  schema: process.env.TRINO_SCHEMA || 'default',
+  // Optional SSL configuration
+  ssl: process.env.TRINO_SSL === 'true' ? { rejectUnauthorized: false } : undefined
+};
+
+// Create a Trino client instance
+const trinoClient = new Client(trinoConfig);
+
+/**
+ * Execute a query against Trino
+ * @param query SQL query to execute
+ * @returns Promise that resolves to the query results
+ */
+export async function executeQuery<T = any>(query: string): Promise<T[]> {
+  try {
+    console.log(`Executing Trino query: ${query}`);
+    const result = await trinoClient.query<T>({
+      query,
+    });
+    return result;
+  } catch (error) {
+    console.error('Error executing Trino query:', error);
+    throw error;
+  }
+}
+
+/**
+ * Build a simple SELECT query
+ * @param table The table name to query
+ * @param columns Array of column names to select
+ * @param whereClause Optional WHERE clause
+ * @param limit Optional LIMIT clause
+ * @returns A SQL query string
+ */
+export function buildSelectQuery(
+  table: string, 
+  columns: string[] = ['*'], 
+  whereClause?: string, 
+  limit?: number
+): string {
+  let query = `SELECT ${columns.join(', ')} FROM ${trinoConfig.catalog}.${trinoConfig.schema}.${table}`;
+  
+  if (whereClause) {
+    query += ` WHERE ${whereClause}`;
+  }
+  
+  if (limit) {
+    query += ` LIMIT ${limit}`;
+  }
+  
+  return query;
+}
+
+/**
+ * Get a record by ID
+ * @param table The table name
+ * @param id The ID value
+ * @param idColumn The column name for the ID
+ * @returns Promise resolving to the record
+ */
+export async function getById<T = any>(
+  table: string, 
+  id: string | number, 
+  idColumn: string = 'id'
+): Promise<T | null> {
+  const idValue = typeof id === 'string' ? `'${id}'` : id;
+  const query = buildSelectQuery(table, ['*'], `${idColumn} = ${idValue}`);
+  
+  const results = await executeQuery<T>(query);
+  return results.length > 0 ? results[0] : null;
+}
+
+/**
+ * Get records with pagination
+ * @param table The table name
+ * @param limit Maximum number of records to return
+ * @param offset Number of records to skip
+ * @param whereClause Optional WHERE clause
+ * @returns Promise resolving to records array
+ */
+export async function getRecords<T = any>(
+  table: string,
+  limit: number = 100,
+  offset: number = 0,
+  whereClause?: string
+): Promise<T[]> {
+  const limitClause = limit > 0 ? limit : 100;
+  const query = whereClause
+    ? `${buildSelectQuery(table, ['*'], whereClause)} LIMIT ${limitClause} OFFSET ${offset}`
+    : `${buildSelectQuery(table, ['*'])} LIMIT ${limitClause} OFFSET ${offset}`;
+  
+  return executeQuery<T>(query);
+} 
