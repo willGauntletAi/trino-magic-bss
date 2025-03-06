@@ -2,6 +2,77 @@ import { Request, Response } from 'express';
 import { getRecords, getById, processFieldSelection } from '../utils/trino-util';
 import { addHrefLinks } from '../utils/api-utils';
 
+/**
+ * Parse query parameters and build a WHERE clause for filtering
+ * @param queryParams Query parameters from the request
+ * @returns WHERE clause string for SQL query
+ */
+function buildWhereClauseFromFilters(queryParams: Record<string, any>): string | undefined {
+  // Skip special parameters that are not filters
+  const nonFilterParams = ['fields', 'limit', 'offset'];
+  
+  // Get filter parameters (all params except for fields, limit, offset)
+  const filterParams = Object.keys(queryParams).filter(param => !nonFilterParams.includes(param));
+  
+  if (filterParams.length === 0) {
+    return undefined;
+  }
+  
+  console.log(`[Filtering] Processing filter parameters: ${filterParams.join(', ')}`);
+  
+  // Build conditions for each filter
+  const conditions: string[] = [];
+  
+  filterParams.forEach(param => {
+    const value = queryParams[param];
+    
+    // Handle different operators
+    if (param.includes('.')) {
+      // Handle attribute paths (e.g., 'customer.name')
+      const [baseName, operator] = param.split('.');
+      
+      if (operator === 'gt' || operator === 'gte' || operator === 'lt' || operator === 'lte' || operator === 'eq') {
+        // Handle comparison operators
+        const opMap: Record<string, string> = {
+          'gt': '>',
+          'gte': '>=',
+          'lt': '<',
+          'lte': '<=',
+          'eq': '='
+        };
+        
+        conditions.push(`"${baseName}" ${opMap[operator]} ${typeof value === 'string' ? `'${value}'` : value}`);
+      } else if (operator === 'regex') {
+        // Handle regex operator (simplified, as Trino may have different regex syntax)
+        conditions.push(`REGEXP_LIKE("${baseName}", '${value}')`);
+      } else {
+        // Handle nested attribute path (e.g., 'customer.address.city')
+        // Note: This assumes a JSON structure for nested fields
+        conditions.push(`JSON_EXTRACT_SCALAR("${param.replace('.', '", "')}", '$') = '${value}'`);
+      }
+    } else {
+      // Handle multiple values for the same parameter (OR condition)
+      if (value.includes(',') || value.includes(';')) {
+        // Split by comma or semicolon for OR conditions
+        const orValues = value.split(/[,;]/);
+        const orConditions = orValues.map(v => 
+          `"${param}" = ${typeof v === 'string' ? `'${v.trim()}'` : v.trim()}`
+        );
+        conditions.push(`(${orConditions.join(' OR ')})`);
+      } else {
+        // Simple equality
+        conditions.push(`"${param}" = ${typeof value === 'string' ? `'${value}'` : value}`);
+      }
+    }
+  });
+  
+  // Join all conditions with AND
+  const whereClause = conditions.join(' AND ');
+  console.log(`[Filtering] Generated WHERE clause: ${whereClause}`);
+  
+  return whereClause;
+}
+
 {{#if isList}}
 /**
  * {{summary}}
@@ -29,13 +100,16 @@ export async function {{operationId}}(req: Request, res: Response) {
       columns = fields ? fields.split(',') : ['*'];
     }
     
+    // Build WHERE clause from filter parameters
+    const whereClause = buildWhereClauseFromFilters(req.query);
+    
     // Get records from Trino
     const records = await getRecords<any>(
       '{{tableName}}',
       limit,
       offset,
-      undefined, // No where clause
-      columns    // Pass the columns to select
+      whereClause, // Pass the generated where clause
+      columns      // Pass the columns to select
     );
     
     // Add href links to the resources
